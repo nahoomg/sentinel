@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nahom Getachew — Showreel 2026</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  body{display:flex;align-items:center;justify-content:center}
+  canvas{display:block;width:100vw;height:56.25vw;max-height:100vh;max-width:177.78vh}
+  body.render canvas{width:1920px;height:1080px;max-width:none;max-height:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/* ============================================================
+   NAHOM GETACHEW — MOTION DESIGN SHOWREEL (15s @ 60fps)
+   Every frame is a pure function of time: draw(t).
+   Open in a browser for realtime playback, or add ?render
+   for frame-accurate offline capture (see render.mjs).
+   ============================================================ */
+const W = 1920, H = 1080, DUR = 15, FPS = 60;
+const RENDER = location.search.includes('render');
+if (RENDER) document.body.classList.add('render');
+const cv = document.getElementById('c');
+cv.width = W; cv.height = H;
+const ctx = cv.getContext('2d');
+const buf = document.createElement('canvas'); buf.width = W; buf.height = H;
+const bctx = buf.getContext('2d');
+
+const C = { bg:'#0B0B10', blk:'#0B0B10', ink:'#F4F1EA', org:'#FF4D1C', blu:'#2E5BFF', lim:'#D4FF3A', pnk:'#FF3D8B' };
+const TAU = Math.PI * 2;
+
+/* ---------- math ---------- */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const lerp = (a, b, t) => a + (b - a) * t;
+const E = {
+  outExpo: t => t >= 1 ? 1 : 1 - Math.pow(2, -10 * t),
+  inExpo: t => t <= 0 ? 0 : Math.pow(2, 10 * t - 10),
+  inOutExpo: t => t <= 0 ? 0 : t >= 1 ? 1 : t < .5 ? Math.pow(2, 20 * t - 10) / 2 : (2 - Math.pow(2, -20 * t + 10)) / 2,
+  outCubic: t => 1 - Math.pow(1 - t, 3),
+  inCubic: t => t * t * t,
+  inOutCubic: t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  outQuint: t => 1 - Math.pow(1 - t, 5),
+  outBack: t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); },
+  outElastic: t => t <= 0 ? 0 : t >= 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - .75) * (TAU / 3)) + 1,
+};
+function mulberry(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+function mixHex(a, b, t) {
+  const A = hexToRgb(a), B = hexToRgb(b);
+  return `rgb(${A.map((v, i) => Math.round(lerp(v, B[i], t))).join(',')})`;
+}
+
+/* ---------- drawing helpers ---------- */
+function bg(col) { ctx.fillStyle = col; ctx.fillRect(-200, -200, W + 400, H + 400); }
+function font(size, w = 900, fam = 'Unb') { ctx.font = `${w} ${size}px ${fam}`; }
+function capHeight(size, w = 900) { font(size, w); return ctx.measureText('H').actualBoundingBoxAscent; }
+
+// Lays out a word letter by letter; fx(i, n) returns per-letter transforms.
+function letters(word, cx, baseY, size, w, color, track, fx) {
+  font(size, w); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  const ch = [...word], ws = ch.map(c => ctx.measureText(c).width);
+  const total = ws.reduce((a, b) => a + b, 0) + track * (ch.length - 1);
+  let x = cx - total / 2;
+  ch.forEach((c, i) => {
+    const o = fx ? fx(i, ch.length) : {};
+    if ((o.a ?? 1) > 0.001) {
+      ctx.save();
+      ctx.translate(x + ws[i] / 2 + (o.dx || 0), baseY + (o.dy || 0));
+      ctx.rotate(o.rot || 0);
+      ctx.scale(o.sx ?? o.sc ?? 1, o.sy ?? o.sc ?? 1);
+      ctx.globalAlpha *= o.a ?? 1;
+      if (o.stroke) { ctx.strokeStyle = o.col || color; ctx.lineWidth = o.stroke; ctx.strokeText(c, -ws[i] / 2, 0); }
+      else { ctx.fillStyle = o.col || color; ctx.fillText(c, -ws[i] / 2, 0); }
+      ctx.restore();
+    }
+    x += ws[i] + track;
+  });
+  return total;
+}
+function wordWidth(word, size, w, track = 0) {
+  font(size, w); return [...word].reduce((a, c) => a + ctx.measureText(c).width, 0) + track * ([...word].length - 1);
+}
+function fitSize(word, maxW, maxSize, w = 900, track = 0) {
+  return Math.min(maxSize, maxSize * maxW / wordWidth(word, maxSize, w, track * 1));
+}
+function clipRect(x, y, w, h) { ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip(); }
+function rrect(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function mono(size, w = 500) { ctx.font = `${w} ${size}px JBM`; }
+
+/* ---------- timing ---------- */
+// Cuts / impacts, synced to a 120 BPM track (beat = 0.5s).
+const IMPACTS = [[2, 1], [4, .5], [6, 1.2], [8.5, .8], [10.5, .7], [12, .6], [12.25, .35], [12.5, .35], [12.75, .35], [13, 1.4]];
+const SECTIONS = [
+  [0, '00', 'OPEN'], [2, '01', 'KINETIC TYPE'], [4, '02', 'GEOMETRY / RHYTHM'], [6, '03', 'PARTICLE SIM'],
+  [8.5, '04', 'REALTIME 3D'], [10.5, '05', 'SHAPE / TIMING'], [12, '06', 'MONTAGE'], [13, '07', 'TITLE'],
+];
+
+/* ============================================================
+   SCENE 0 — OPEN: dot → line → timeline ruler → flood (0–2s)
+   ============================================================ */
+function scene0(t) {
+  bg(C.bg);
+  const cx = W / 2, cy = H / 2;
+  const pop = E.outBack(prog(t, .15, .45));
+  const st = E.inOutExpo(prog(t, .5, 1.05));
+  const len = lerp(0, 1500, st);
+  const r = 13 * pop;
+  const th = lerp(r * 2, 6, st);
+  const flood = E.inExpo(prog(t, 1.6, 2.0));
+
+  // ruler ticks under the line
+  const ticks = 31;
+  for (let i = 0; i < ticks; i++) {
+    const p = E.outExpo(prog(t, 1.0 + i * .008, 1.25 + i * .008)) * (1 - E.inExpo(prog(t, 1.45, 1.65)));
+    if (p <= 0) continue;
+    const x = cx - 750 + i * 50, big = i % 5 === 0;
+    ctx.fillStyle = big ? C.ink : 'rgba(244,241,234,.45)';
+    ctx.fillRect(x - 1, cy + 14, 2, (big ? 26 : 12) * p);
+    if (big) {
+      mono(14); ctx.textAlign = 'center'; ctx.globalAlpha = p;
+      ctx.fillText(String(i / 5 * 50).padStart(3, '0'), x, cy + 64); ctx.globalAlpha = 1;
+    }
+  }
+
+  // headline revealed out of the line (mask above)
+  const up = E.outExpo(prog(t, 1.05, 1.45)) - E.inExpo(prog(t, 1.45, 1.65));
+  if (up > 0.001) {
+    ctx.save(); clipRect(0, 0, W, cy - th / 2);
+    const s = 118, cap = capHeight(s, 800);
+    letters('SHOWREEL', cx, cy - 30 + (1 - up) * (cap + 40), s, 800, C.ink, 18, (i) => ({
+      dy: (1 - E.outExpo(prog(t, 1.05 + i * .025, 1.4 + i * .025))) * 60,
+    }));
+    ctx.restore();
+    ctx.save(); clipRect(0, cy + th / 2, W, H);
+    mono(26, 700); ctx.fillStyle = C.org; ctx.textAlign = 'center';
+    ctx.fillText('— NAHOM GETACHEW · 2026 —', cx, cy + 118 - (1 - up) * 90);
+    ctx.restore();
+  }
+
+  // line + playhead highlight
+  const w = Math.max(r * 2, len);
+  const h = lerp(th, H + 40, flood);
+  ctx.fillStyle = flood > 0 ? mixHex(C.ink, C.org, Math.min(1, flood * 3)) : C.ink;
+  if (r > 0) { rrect(cx - w / 2 - flood * 400, cy - h / 2, w + flood * 800, h, h / 2 * (1 - flood)); ctx.fill(); }
+  const ph = prog(t, 1.0, 1.6);
+  if (ph > 0 && ph < 1 && flood === 0) {
+    const px = cx - 750 + E.inOutCubic(ph) * 1500;
+    ctx.fillStyle = C.org; ctx.fillRect(px - 2, cy - 40, 4, 80);
+    ctx.beginPath(); ctx.moveTo(px - 12, cy - 52); ctx.lineTo(px + 12, cy - 52); ctx.lineTo(px, cy - 38); ctx.fill();
+  }
+}
+
+/* ============================================================
+   SCENE 1 — KINETIC TYPE: MOVE / SHAPE / TIME / FEEL (2–4s)
+   ============================================================ */
+function scene1(t) {
+  const k = Math.min(3, Math.floor((t - 2) / .5)), lt = t - 2 - k * .5;
+  const cx = W / 2, cy = H / 2;
+  if (k === 0) { // MOVE — mask rise + speed lines
+    bg(C.org);
+    ctx.fillStyle = C.blk;
+    for (let i = 0; i < 9; i++) {
+      const y = 120 + i * 105, sp = 2600 + hash(i) * 2200, L = 180 + hash(i + 9) * 380;
+      const x = ((lt * sp + hash(i + 3) * 2400) % (W + 900)) - 450;
+      ctx.globalAlpha = .12 + hash(i + 5) * .2; ctx.fillRect(x, y, L, 6); ctx.globalAlpha = 1;
+    }
+    const s = 390, cap = capHeight(s), base = cy + cap / 2;
+    ctx.save(); clipRect(0, base - cap - 20, W, cap + 60);
+    letters('MOVE', cx + lerp(-60, 30, E.outCubic(prog(lt, 0, .5))), base, s, 900, C.blk, -8, (i) => {
+      const p = E.outExpo(prog(lt, i * .035, i * .035 + .3));
+      return { dy: (1 - p) * (cap + 60), sx: lerp(.7, 1, p) };
+    });
+    ctx.restore();
+    arrow(cx + 760, cy - cap / 2 - 90, E.outExpo(prog(lt, .12, .4)));
+  } else if (k === 1) { // SHAPE — rotate in + expanding outline echoes
+    bg(C.blu);
+    const s = 300, cap = capHeight(s), base = cy + cap / 2;
+    const ex = E.outExpo(prog(lt, .05, .5));
+    for (let e = 6; e >= 1; e--) {
+      ctx.save(); ctx.translate(cx, cy); const sc = 1 + e * .14 * ex; ctx.scale(sc, sc); ctx.translate(-cx, -cy);
+      ctx.globalAlpha = .5 / e * ex;
+      letters('SHAPE', cx, base, s, 900, C.ink, 0, () => ({ stroke: 2.5 / sc }));
+      ctx.restore();
+    }
+    letters('SHAPE', cx, base, s, 900, C.ink, 0, (i) => {
+      const p = E.outBack(prog(lt, i * .04, i * .04 + .28));
+      return { rot: (1 - p) * -Math.PI / 2, dy: (1 - p) * 120, sc: lerp(.3, 1, clamp(p)), a: clamp(p * 3) };
+    });
+  } else if (k === 2) { // TIME — marquee rows + stretch
+    bg(C.blk);
+    font(120, 900); ctx.textAlign = 'left';
+    for (let r = 0; r < 8; r++) {
+      if (r === 3 || r === 4) continue;
+      const y = 60 + r * 140, dir = r % 2 ? 1 : -1;
+      const x = -600 + dir * lt * 1400 + r * 170;
+      ctx.strokeStyle = C.lim; ctx.lineWidth = 2; ctx.globalAlpha = .28;
+      ctx.strokeText('TIME TIME TIME TIME TIME TIME TIME', x, y + 90);
+    }
+    ctx.globalAlpha = 1;
+    const s = 380, cap = capHeight(s), base = cy + cap / 2;
+    const p = E.outExpo(prog(lt, 0, .35));
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(lerp(2.4, 1, p), lerp(.25, 1, p)); ctx.translate(-cx, -cy);
+    letters('TIME', cx, base, s, 900, C.lim, 0);
+    ctx.restore();
+    const bw = 900 * E.inOutCubic(prog(lt, .02, .48));
+    ctx.fillStyle = C.pnk; ctx.fillRect(cx - 450, base + 40, bw, 12);
+    mono(18, 700); ctx.fillStyle = C.pnk; ctx.textAlign = 'right';
+    ctx.fillText(`${(lt * 1000).toFixed(0).padStart(3, '0')} ms`, cx + 450, base + 90);
+  } else { // FEEL — elastic letters + circle + iris out
+    bg(C.lim);
+    const cr = 380 * E.outElastic(prog(lt, 0, .45));
+    ctx.fillStyle = C.pnk; ctx.beginPath(); ctx.arc(cx, cy, Math.max(0, cr), 0, TAU); ctx.fill();
+    const s = 330, cap = capHeight(s), base = cy + cap / 2;
+    letters('FEEL', cx, base, s, 900, C.blk, 0, (i) => {
+      const p = E.outElastic(prog(lt, i * .05, i * .05 + .4));
+      return { sc: Math.max(0, p), rot: (1 - p) * .6 };
+    });
+    const ir = E.inExpo(prog(t, 3.78, 4.0)) * 1200;
+    if (ir > 0) { ctx.fillStyle = C.bg; ctx.beginPath(); ctx.arc(cx, cy, ir, 0, TAU); ctx.fill(); }
+  }
+}
+function arrow(x, y, p) {
+  if (p <= 0) return;
+  ctx.save(); ctx.translate(x, y); ctx.rotate(-Math.PI / 4 * (1 - p) ); ctx.scale(p, p);
+  ctx.strokeStyle = C.blk; ctx.lineWidth = 22; ctx.lineCap = 'square';
+  ctx.beginPath(); ctx.moveTo(-70, 70); ctx.lineTo(70, -70); ctx.moveTo(-10, -70); ctx.lineTo(70, -70); ctx.lineTo(70, 10); ctx.stroke();
+  ctx.restore();
+}
+
+/* ============================================================
+   SCENE 2 — GEOMETRY: morphing wave grid, spiral collapse (4–6s)
+   ============================================================ */
+function scene2(t) {
+  bg(C.bg);
+  const lt = t - 4;
+  const zoom = 1 + .4 * E.inOutCubic(prog(t, 4.85, 5.5));
+  const rot = Math.PI / 5 * E.inOutCubic(prog(t, 4.85, 5.6));
+  const col = E.inExpo(prog(t, 5.45, 6.0));
+  ctx.save(); ctx.translate(W / 2, H / 2);
+
+  // beat rings
+  for (const b of [4, 4.5, 5, 5.5]) {
+    const p = prog(t, b, b + .5); if (p <= 0 || p >= 1) continue;
+    ctx.strokeStyle = C.org; ctx.globalAlpha = (1 - p) * .7; ctx.lineWidth = 3 * (1 - p) + .5;
+    ctx.beginPath(); ctx.arc(0, 0, E.outCubic(p) * 1100, 0, TAU); ctx.stroke(); ctx.globalAlpha = 1;
+  }
+  ctx.rotate(rot); ctx.scale(zoom, zoom);
+  const cols = 19, rows = 11, sp = 108;
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    const x = (i - (cols - 1) / 2) * sp, y = (j - (rows - 1) / 2) * sp;
+    const r0 = Math.hypot(x, y), d = r0 / 1100;
+    const inP = E.outBack(prog(lt, d * .5, d * .5 + .35));
+    if (inP <= 0) continue;
+    const wave = Math.sin(d * 11 - lt * 8);
+    let sz = (36 + 22 * wave) * inP;
+    const th = Math.atan2(y, x) + col * 5 * (1 - d * .5);
+    const rr = r0 * (1 - col);
+    const px = Math.cos(th) * rr, py = Math.sin(th) * rr;
+    sz *= 1 - col * .75;
+    const round = (wave + 1) / 2; // 0 → square, 1 → circle
+    ctx.save(); ctx.translate(px, py); ctx.rotate(wave * Math.PI / 4 + lt * 1.5 + col * 4);
+    rrect(-sz / 2, -sz / 2, sz, sz, round * sz / 2);
+    if (wave > .55) { ctx.fillStyle = C.org; ctx.fill(); }
+    else if (wave < -.6) { ctx.fillStyle = C.blu; ctx.fill(); }
+    else if ((i + j) % 7 === 0) { ctx.fillStyle = C.lim; ctx.fill(); }
+    else { ctx.strokeStyle = C.ink; ctx.lineWidth = 2.5; ctx.globalAlpha = .85; ctx.stroke(); }
+    ctx.restore();
+  }
+  ctx.restore();
+  // core glow as it collapses
+  if (col > 0) {
+    const g = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, 300 * col + 1);
+    g.addColorStop(0, `rgba(255,120,60,${.9 * col})`); g.addColorStop(1, 'rgba(255,77,28,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+}
+
+/* ============================================================
+   SCENE 3 — PARTICLES: explode → assemble "NAHOM" → wind (6–8.5s)
+   ============================================================ */
+let PARTS = [];
+const PCOLS = [C.org, '#FF6A2E', '#FF4F5E', C.pnk, '#C64CFF', '#7A55FF', C.blu, '#4F8BFF'];
+function buildParticles() {
+  const oc = document.createElement('canvas'); oc.width = W; oc.height = H;
+  const o = oc.getContext('2d');
+  const size = 300; o.font = `900 ${size}px Unb`;
+  const tw = o.measureText('NAHOM').width, cap = o.measureText('H').actualBoundingBoxAscent;
+  o.fillStyle = '#fff'; o.textBaseline = 'alphabetic';
+  o.fillText('NAHOM', W / 2 - tw / 2, H / 2 + cap / 2 + 20);
+  const d = o.getImageData(0, 0, W, H).data, pts = [];
+  for (let y = 0; y < H; y += 7) for (let x = 0; x < W; x += 7) if (d[(y * W + x) * 4 + 3] > 128) pts.push([x, y]);
+  const R = mulberry(7);
+  for (let i = pts.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [pts[i], pts[j]] = [pts[j], pts[i]]; }
+  const minX = W / 2 - tw / 2;
+  PARTS = pts.map(([x, y]) => {
+    const r1 = R(), r2 = R(), r3 = R(), r4 = R();
+    const u = clamp((x - minX) / tw);
+    return { tx: x, ty: y, r1, r2, r3, r4, a0: R() * TAU, d: u * .28 + r3 * .18, ci: Math.min(PCOLS.length - 1, Math.floor(u * PCOLS.length)) };
+  });
+}
+function ppos(p, t) {
+  const a = E.outExpo(prog(t, 6.0, 6.6));
+  const ang = p.a0 + a * (1.2 + p.r2 * 1.6);
+  const R = a * (220 + p.r1 * 820);
+  let x = W / 2 + Math.cos(ang) * R, y = H / 2 + Math.sin(ang) * R * .6;
+  const b = E.inOutCubic(prog(t, 6.3 + p.d, 6.3 + p.d + .75));
+  const wob = (1 - b) * b * 4 * 70;
+  x = lerp(x, p.tx, b) + Math.sin(p.a0 * 3 + t * 5) * wob;
+  y = lerp(y, p.ty, b) + Math.cos(p.a0 * 5 + t * 5) * wob;
+  const sh = prog(t, 7.2, 7.4);
+  x += Math.sin(t * 7 + p.r3 * 20) * 1.4 * sh; y += Math.cos(t * 6 + p.r4 * 20) * 1.4 * sh;
+  const w = E.inCubic(prog(t, 8.0 + (p.tx / W) * .14 + p.r4 * .05, 8.45 + (p.tx / W) * .14));
+  x += w * (1900 + p.r1 * 1400);
+  y += w * ((p.r2 - .5) * 260 + Math.sin(p.tx * .012) * 90);
+  return [x, y];
+}
+function scene3(t) {
+  bg(C.bg);
+  const built = E.outCubic(prog(t, 6.6, 7.4)) * (1 - E.inCubic(prog(t, 8.0, 8.4)));
+  const g = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, 900);
+  g.addColorStop(0, `rgba(255,61,139,${.22 * built})`); g.addColorStop(.5, `rgba(46,91,255,${.12 * built})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round'; ctx.lineWidth = 4.4;
+  const dt = 1.6 / FPS;
+  for (let c = 0; c < PCOLS.length; c++) {
+    ctx.strokeStyle = PCOLS[c]; ctx.globalAlpha = 1; ctx.beginPath();
+    for (const p of PARTS) {
+      if (p.ci !== c) continue;
+      const [x, y] = ppos(p, t), [px, py] = ppos(p, t - dt);
+      ctx.moveTo(px, py); ctx.lineTo(x + .01, y);
+    }
+    ctx.stroke();
+  }
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+
+  // "hello, i'm" + subtitle
+  const hi = E.outExpo(prog(t, 7.1, 7.5)) * (1 - E.inCubic(prog(t, 7.95, 8.15)));
+  if (hi > 0) {
+    mono(26, 700); ctx.textAlign = 'center'; ctx.fillStyle = C.ink; ctx.globalAlpha = hi;
+    const txt = "HELLO, I'M", n = Math.floor(clamp(prog(t, 7.1, 7.4)) * txt.length);
+    ctx.fillText(txt.slice(0, n) + (n < txt.length ? '_' : ''), W / 2, H / 2 - 175);
+    ctx.globalAlpha = 1;
+  }
+}
+
+/* ============================================================
+   SCENE 4 — REALTIME 3D: sphere → torus → flat ring (8.5–10.5s)
+   ============================================================ */
+const N3 = 1600, SPH = [], TOR = [];
+(function build3d() {
+  const ga = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < N3; i++) {
+    const y = 1 - (i / (N3 - 1)) * 2, r = Math.sqrt(1 - y * y), th = ga * i;
+    SPH.push([Math.cos(th) * r, y, Math.sin(th) * r]);
+    const u = (i % 80) / 80 * TAU, v = Math.floor(i / 80) / 20 * TAU;
+    const R = 1.05, rr = .38;
+    TOR.push([(R + rr * Math.cos(v)) * Math.cos(u), rr * Math.sin(v), (R + rr * Math.cos(v)) * Math.sin(u)]);
+  }
+})();
+function scene4(t) {
+  const lt = t - 8.5;
+  bg(C.bg);
+  const blobs = [[C.blu, -380, -120, 1.1], [C.pnk, 420, 160, 1.7], [C.org, 60, 300, 2.3]];
+  for (const [c, bx, by, f] of blobs) {
+    const x = W / 2 + bx + Math.sin(lt * f) * 120, y = H / 2 + by + Math.cos(lt * f * .8) * 90;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, 620);
+    const [r, gg, b] = hexToRgb(c);
+    g.addColorStop(0, `rgba(${r},${gg},${b},.33)`); g.addColorStop(1, `rgba(${r},${gg},${b},0)`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  const inS = E.outBack(prog(t, 8.5, 8.95));
+  const m = E.inOutExpo(prog(t, 9.25, 9.85));
+  const flat = E.inExpo(prog(t, 10.1, 10.5));
+  const ry = lt * 1.5 + m * 1.2, rx = .35 + Math.sin(lt * 1.3) * .25 + m * .55;
+  const cyr = Math.cos(ry), syr = Math.sin(ry), cxr = Math.cos(rx), sxr = Math.sin(rx);
+
+  // orbit rings
+  for (let k = 0; k < 2; k++) {
+    const tilt = (k ? -.35 : .28) + Math.sin(lt * .9 + k) * .08;
+    const a = E.outExpo(prog(t, 8.6 + k * .1, 9.1 + k * .1)) * (1 - flat);
+    if (a <= 0) continue;
+    ctx.save(); ctx.translate(W / 2, H / 2); ctx.rotate(tilt);
+    ctx.strokeStyle = C.ink; ctx.globalAlpha = .25 * a; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(0, 0, 640 * a, 130 * a + k * 40, 0, 0, TAU); ctx.stroke();
+    const ang = lt * (k ? -2.4 : 3.1);
+    ctx.globalAlpha = a; ctx.fillStyle = k ? C.lim : C.org;
+    ctx.beginPath(); ctx.arc(Math.cos(ang) * 640 * a, Math.sin(ang) * (130 * a + k * 40), 7, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+
+  const P = new Array(N3);
+  for (let i = 0; i < N3; i++) {
+    const s = SPH[i], q = TOR[i];
+    const rip = 1 + .07 * Math.sin(s[1] * 7 + lt * 7) * (1 - m);
+    let x = lerp(s[0] * rip, q[0], m), y = lerp(s[1] * rip, q[1], m), z = lerp(s[2] * rip, q[2], m);
+    let x1 = x * cyr + z * syr, z1 = -x * syr + z * cyr;
+    let y1 = y * cxr - z1 * sxr, z2 = y * sxr + z1 * cxr;
+    const f = 3.4 / (3.4 + z2), sc = 400 * inS * f;
+    let sx = W / 2 + x1 * sc, sy = H / 2 + y1 * sc;
+    if (flat > 0) {
+      const a = Math.atan2(sy - H / 2, sx - W / 2);
+      sx = lerp(sx, W / 2 + Math.cos(a) * 240, flat); sy = lerp(sy, H / 2 + Math.sin(a) * 240, flat);
+    }
+    P[i] = [sx, sy, z2];
+  }
+  P.sort((a, b) => b[2] - a[2]);
+  for (const [sx, sy, z] of P) {
+    const dep = clamp((1.3 - z) / 2.6);
+    ctx.fillStyle = dep > .62 ? C.ink : dep > .38 ? C.pnk : C.blu;
+    ctx.globalAlpha = lerp(.25, 1, dep);
+    ctx.beginPath(); ctx.arc(sx, sy, lerp(1.3, 4.6, dep), 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // readout
+  const ra = E.outExpo(prog(t, 8.8, 9.2)) * (1 - flat);
+  if (ra > 0) {
+    mono(16, 500); ctx.fillStyle = C.ink; ctx.globalAlpha = .75 * ra; ctx.textAlign = 'left';
+    const rows = [`ROT.Y  ${((ry * 180 / Math.PI) % 360).toFixed(1).padStart(6)}°`, `ROT.X  ${(rx * 180 / Math.PI).toFixed(1).padStart(6)}°`,
+      `MORPH  ${m.toFixed(3)}`, `VERTS  ${N3}`];
+    rows.forEach((r, i) => ctx.fillText(r, W / 2 + 470, H / 2 + 200 + i * 24));
+    ctx.fillRect(W / 2 + 470, H / 2 + 180, 160, 2);
+    ctx.globalAlpha = 1;
+  }
+}
+
+/* ============================================================
+   SCENE 5 — SHAPE / TIMING: morphs, graph editor, bounce (10.5–12s)
+   ============================================================ */
+const NS = 180;
+function polyRadii(verts) {
+  const out = [];
+  for (let k = 0; k < NS; k++) {
+    const th = k / NS * TAU - Math.PI / 2, dx = Math.cos(th), dy = Math.sin(th);
+    let best = 1e9;
+    for (let i = 0; i < verts.length; i++) {
+      const A = verts[i], B = verts[(i + 1) % verts.length];
+      const ex = B[0] - A[0], ey = B[1] - A[1], den = dx * ey - dy * ex;
+      if (Math.abs(den) < 1e-9) continue;
+      const tt = (A[0] * ey - A[1] * ex) / den, s = (A[0] * dy - A[1] * dx) / den;
+      if (s >= -1e-6 && s <= 1 + 1e-6 && tt > 0) best = Math.min(best, tt);
+    }
+    out.push(best);
+  }
+  return out;
+}
+const reg = (n, r, off = -Math.PI / 2) => Array.from({ length: n }, (_, i) => [Math.cos(off + i * TAU / n) * r, Math.sin(off + i * TAU / n) * r]);
+const star = Array.from({ length: 10 }, (_, i) => { const a = -Math.PI / 2 + i * TAU / 10, r = i % 2 ? .52 : 1.3; return [Math.cos(a) * r, Math.sin(a) * r]; });
+const SHAPES = [new Array(NS).fill(1), polyRadii(reg(4, 1.25, -Math.PI / 4)), polyRadii(reg(3, 1.35)), polyRadii(star), polyRadii(reg(6, 1.12))];
+const SHAPE_COL = [C.blk, C.blu, C.org, C.pnk, C.blk];
+const MKEYS = [[10.5, 0], [10.75, 1], [11.0, 2], [11.25, 3], [11.5, 4], [11.75, 0]];
+function shapeState(t) {
+  let k = 0; for (let i = 0; i < MKEYS.length; i++) if (t >= MKEYS[i][0]) k = i;
+  const from = MKEYS[Math.max(0, k - 1)][1], to = MKEYS[k][1];
+  const e = E.outExpo(prog(t, MKEYS[k][0], MKEYS[k][0] + .22));
+  let rot = 0, pulse = 1;
+  for (let i = 1; i < MKEYS.length; i++) {
+    rot += E.outBack(prog(t, MKEYS[i][0], MKEYS[i][0] + .3)) * Math.PI / 2;
+    pulse += .14 * Math.sin(Math.PI * prog(t, MKEYS[i][0], MKEYS[i][0] + .18));
+  }
+  const radii = SHAPES[from].map((r, i) => lerp(r, SHAPES[to][i], e));
+  return { radii, rot, pulse, from, to, e, k };
+}
+function shapePath(st, cx, cy, size) {
+  ctx.beginPath();
+  for (let i = 0; i < NS; i++) {
+    const th = i / NS * TAU - Math.PI / 2 + st.rot, r = st.radii[i] * size * st.pulse;
+    const x = cx + Math.cos(th) * r, y = cy + Math.sin(th) * r;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
+function scene5(t) {
+  bg(C.ink);
+  const cx = W / 2, cy = H / 2 - 20;
+  const intro = E.outExpo(prog(t, 10.5, 10.8));
+  const cover = E.inExpo(prog(t, 11.8, 12.0));
+  const size = lerp(190, 200, intro) * (1 + cover * 12);
+
+  // dotted guides
+  ctx.strokeStyle = 'rgba(11,11,16,.18)'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 10]);
+  ctx.beginPath(); ctx.moveTo(cx, 80); ctx.lineTo(cx, H - 80); ctx.moveTo(120, cy); ctx.lineTo(W - 120, cy); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, 330 * intro, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+
+  // echo trails
+  for (let e = 7; e >= 1; e--) {
+    const st = shapeState(t - e * .02);
+    shapePath(st, cx, cy, size);
+    ctx.strokeStyle = C.org; ctx.globalAlpha = .55 * (1 - e / 8); ctx.lineWidth = 3; ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  const st = shapeState(t);
+  shapePath(st, cx, cy, size);
+  const fillCol = cover > 0 ? C.blk : mixHex(SHAPE_COL[st.from], SHAPE_COL[st.to], st.e);
+  ctx.fillStyle = fillCol; ctx.fill();
+  if (cover > .9) return;
+
+  // graph editor panel
+  const gx = W - 520, gy = H - 360, gw = 400, gh = 240;
+  const pa = E.outExpo(prog(t, 10.55, 10.9));
+  ctx.save(); ctx.translate(0, (1 - pa) * 60); ctx.globalAlpha = pa;
+  ctx.fillStyle = 'rgba(11,11,16,.05)'; rrect(gx - 20, gy - 50, gw + 40, gh + 80, 14); ctx.fill();
+  ctx.strokeStyle = C.blk; ctx.lineWidth = 2; ctx.stroke();
+  mono(14, 700); ctx.fillStyle = C.blk; ctx.textAlign = 'left';
+  ctx.fillText('GRAPH EDITOR  ·  expo.out', gx, gy - 20);
+  ctx.strokeStyle = 'rgba(11,11,16,.12)'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    ctx.beginPath(); ctx.moveTo(gx + i * gw / 4, gy); ctx.lineTo(gx + i * gw / 4, gy + gh);
+    ctx.moveTo(gx, gy + i * gh / 4); ctx.lineTo(gx + gw, gy + i * gh / 4); ctx.stroke();
+  }
+  ctx.strokeStyle = C.blk; ctx.lineWidth = 3; ctx.beginPath();
+  for (let i = 0; i <= 60; i++) { const u = i / 60, x = gx + u * gw, y = gy + gh - E.outExpo(u) * gh; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  ctx.stroke();
+  ctx.strokeStyle = C.org; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(gx, gy + gh); ctx.lineTo(gx + gw * .16, gy); ctx.moveTo(gx + gw, gy); ctx.lineTo(gx + gw * .6, gy); ctx.stroke();
+  ctx.fillStyle = C.org; ctx.fillRect(gx + gw * .16 - 5, gy - 5, 10, 10); ctx.fillRect(gx + gw * .6 - 5, gy - 5, 10, 10);
+  const u = prog(t, MKEYS[st.k][0], MKEYS[st.k][0] + .22);
+  const px = gx + u * gw, py = gy + gh - E.outExpo(u) * gh;
+  ctx.strokeStyle = C.blu; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(px, gy); ctx.lineTo(px, gy + gh); ctx.stroke();
+  ctx.fillStyle = C.blu; ctx.beginPath(); ctx.arc(px, py, 8, 0, TAU); ctx.fill();
+  ctx.restore();
+
+  // bouncing ball with squash & stretch
+  const bx0 = 160, bx1 = 620, ground = H - 170;
+  const ba = E.outExpo(prog(t, 10.6, 10.9));
+  ctx.globalAlpha = ba;
+  ctx.strokeStyle = C.blk; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(bx0 - 20, ground); ctx.lineTo(bx1 + 60, ground); ctx.stroke();
+  const ball = (tt) => {
+    const lt = tt - 10.5, ph = ((lt / .25) % 1 + 1) % 1;
+    return { x: bx0 + clamp(lt / 1.5) * (bx1 - bx0), ph, h: 4 * ph * (1 - ph) * 220 };
+  };
+  for (let i = 1; i <= 14; i++) {
+    const b = ball(t - i * .018); if (t - i * .018 < 10.5) break;
+    ctx.fillStyle = C.blk; ctx.globalAlpha = ba * .4 * (1 - i / 15);
+    ctx.beginPath(); ctx.arc(b.x, ground - 34 - b.h, 3, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = ba;
+  const b = ball(t), contact = Math.max(0, 1 - Math.min(b.ph, 1 - b.ph) / .1), speed = Math.abs(1 - 2 * b.ph);
+  const sx = 1 + .45 * contact - .15 * speed * (1 - contact), sy = 1 - .38 * contact + .25 * speed * (1 - contact);
+  ctx.fillStyle = 'rgba(11,11,16,.15)'; ctx.beginPath(); ctx.ellipse(b.x, ground, 40 * (1 - b.h / 500), 7, 0, 0, TAU); ctx.fill();
+  ctx.save(); ctx.translate(b.x, ground); ctx.scale(sx, sy);
+  ctx.fillStyle = C.org; ctx.beginPath(); ctx.arc(0, -34 - b.h / sy, 34, 0, TAU); ctx.fill(); ctx.restore();
+  mono(14, 700); ctx.fillStyle = C.blk; ctx.textAlign = 'left';
+  ctx.fillText('SQUASH / STRETCH', bx0 - 20, ground + 36);
+  ctx.globalAlpha = 1;
+
+  // morph label
+  const names = ['CIRCLE', 'SQUARE', 'TRIANGLE', 'STAR', 'HEXAGON'];
+  mono(16, 700); ctx.fillStyle = C.blk; ctx.textAlign = 'center';
+  ctx.fillText(`${names[st.from]}  →  ${names[st.to]}`, cx, cy + 330);
+}
+
+/* ============================================================
+   SCENE 6 — MONTAGE: four 1/8-note cards with glitch (12–13s)
+   ============================================================ */
+const CARDS = [
+  { bg: C.org, fg: C.blk, w: '2D', sub: 'CHARACTER · CEL · VECTOR' },
+  { bg: C.blu, fg: C.ink, w: '3D', sub: 'LOOKDEV · LIGHT · RENDER' },
+  { bg: C.pnk, fg: C.blk, w: 'TYPE', sub: 'KINETIC TYPOGRAPHY' },
+  { bg: C.lim, fg: C.blk, w: 'VFX', sub: 'COMPOSITING · SIMULATION' },
+];
+function scene6(t) {
+  const k = Math.min(3, Math.floor((t - 12) / .25)), lt = t - 12 - k * .25, c = CARDS[k];
+  bg(c.bg);
+  // rotating stripe field
+  ctx.save(); ctx.translate(W / 2, H / 2); ctx.rotate(-.5 + k * .7 + lt * .8);
+  ctx.fillStyle = c.fg; ctx.globalAlpha = .08;
+  for (let i = -14; i <= 14; i++) ctx.fillRect(i * 110 + (lt * 900) % 110, -1400, 40, 2800);
+  ctx.restore(); ctx.globalAlpha = 1;
+  const p = E.outExpo(prog(lt, 0, .2));
+  const s = fitSize(c.w, 1400, 560), cap = capHeight(s), base = H / 2 + cap / 2 - 30;
+  ctx.save(); ctx.translate(W / 2, H / 2); ctx.scale(lerp(1.35, 1, p), lerp(1.35, 1, p)); ctx.translate(-W / 2, -H / 2);
+  letters(c.w, W / 2 + (1 - p) * (k % 2 ? -80 : 80), base, s, 900, c.fg, 0);
+  ctx.restore();
+  mono(24, 700); ctx.fillStyle = c.fg; ctx.textAlign = 'center';
+  ctx.fillText(c.sub, W / 2, base + 90);
+  mono(20, 700); ctx.textAlign = 'left'; ctx.fillText(`0${k + 1} / 04`, 120, H / 2 + 6);
+  ctx.fillRect(120, H / 2 + 20, 120 * E.outExpo(prog(lt, 0, .22)), 4);
+  // glitch slices on the cut
+  if (lt < .06) {
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+    bctx.clearRect(0, 0, W, H); bctx.drawImage(cv, 0, 0);
+    const n = 9;
+    for (let i = 0; i < n; i++) {
+      const y = Math.floor(hash(k * 31 + i) * H), h = 12 + hash(k * 17 + i) * 90, dx = (hash(k * 7 + i + Math.floor(lt * 120)) - .5) * 260;
+      ctx.drawImage(buf, 0, y, W, h, dx, y, W, h);
+    }
+    ctx.globalCompositeOperation = 'difference'; ctx.fillStyle = '#fff';
+    ctx.fillRect(0, hash(k + 2) * H, W, 26);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
+  }
+}
+
+/* ============================================================
+   SCENE 7 — TITLE: NAHOM GETACHEW (13–15s) + bookend close
+   ============================================================ */
+const GLYPHS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&*+/<>';
+function scene7(t) {
+  bg(C.bg);
+  const lt = t - 13;
+  // dotted grid
+  const ga = E.outCubic(prog(t, 13.1, 13.8));
+  ctx.fillStyle = C.ink;
+  for (let y = 60; y < H; y += 60) for (let x = 60; x < W; x += 60) {
+    const d = Math.hypot(x - W / 2, y - H / 2) / 1100;
+    const a = clamp(ga * 1.4 - d) * .18; if (a <= 0) continue;
+    ctx.globalAlpha = a; ctx.fillRect(x - 1, y - 1, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+  // shock rings
+  for (let i = 0; i < 3; i++) {
+    const p = prog(t, 13 + i * .08, 13.9 + i * .08); if (p <= 0 || p >= 1) continue;
+    ctx.strokeStyle = i === 1 ? C.pnk : C.org; ctx.globalAlpha = (1 - p) * .8; ctx.lineWidth = 6 * (1 - p) + 1;
+    ctx.beginPath(); ctx.arc(W / 2, H / 2, E.outExpo(p) * 1150, 0, TAU); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // drifting motes
+  const R = mulberry(3);
+  for (let i = 0; i < 90; i++) {
+    const x = R() * W, y0 = R() * H, sp = 20 + R() * 60, sz = .8 + R() * 2.2;
+    const y = ((y0 - lt * sp) % H + H) % H;
+    ctx.fillStyle = i % 5 ? C.ink : C.org; ctx.globalAlpha = .35 * ga; ctx.fillRect(x, y, sz, sz);
+  }
+  ctx.globalAlpha = 1;
+
+  // name
+  const track = lerp(34, 4, E.outCubic(prog(t, 13, 14.6)));
+  const s = Math.min(210, fitSize('GETACHEW', 1480, 210, 800, track));
+  const cap = capHeight(s, 800);
+  const gap = 36, top = H / 2 - (cap * 2 + gap) / 2 - 30;
+  const lines = [['NAHOM', top + cap, 13.0], ['GETACHEW', top + cap * 2 + gap, 13.1]];
+  let wLine2 = 0;
+  for (const [word, base, t0] of lines) {
+    ctx.save(); clipRect(0, base - cap - 8, W, cap + 16);
+    const w = letters(word, W / 2, base, s, 800, C.ink, track, (i, n) => {
+      const p = E.outExpo(prog(t, t0 + i * .035, t0 + i * .035 + .55));
+      return { dy: (1 - p) * (cap + 30), rot: (1 - p) * .25 };
+    });
+    ctx.restore();
+    if (word === 'GETACHEW') wLine2 = w;
+  }
+  // underline
+  const ul = E.inOutExpo(prog(t, 13.35, 13.9));
+  const ulY = top + cap * 2 + gap + 34;
+  ctx.fillStyle = C.org; ctx.fillRect(W / 2 - wLine2 / 2, ulY, wLine2 * ul, 10);
+  // orange dot punctuation
+  const dp = E.outBack(prog(t, 13.75, 14.05));
+  if (dp > 0) { ctx.beginPath(); ctx.arc(W / 2 + wLine2 / 2 + 34, top + cap * 2 + gap - 16, 16 * dp, 0, TAU); ctx.fill(); }
+  // subtitle decode
+  const sub = 'MOTION DESIGNER  ·  ANIMATOR  ·  ART DIRECTOR';
+  mono(28, 700); ctx.textAlign = 'left'; ctx.fillStyle = C.ink;
+  const spacing = 5, chars = [...sub];
+  const cw = ctx.measureText('M').width + spacing, sx = W / 2 - (chars.length * cw) / 2;
+  chars.forEach((ch, i) => {
+    const t0 = 13.55 + i * .012, t1 = t0 + .22;
+    if (t < t0) return;
+    let out = ch;
+    if (t < t1 && ch !== ' ') { out = GLYPHS[Math.floor(hash(i * 13 + Math.floor(t * 40)) * GLYPHS.length)]; ctx.fillStyle = C.org; }
+    else ctx.fillStyle = C.ink;
+    ctx.fillText(out, sx + i * cw, ulY + 90);
+  });
+  // footer
+  const fa = E.outExpo(prog(t, 14.05, 14.4));
+  if (fa > 0) {
+    mono(18, 500); ctx.globalAlpha = fa * .8; ctx.fillStyle = C.ink;
+    ctx.textAlign = 'center';
+    ctx.fillText('2D  ·  3D  ·  TYPE  ·  PARTICLES  ·  VFX', W / 2, H - 150 + (1 - fa) * 20);
+    ctx.globalAlpha = 1;
+  }
+}
+// Bookend: letterbox closes to a line, line shrinks back to the opening dot.
+function closer(t) {
+  const e = E.inExpo(prog(t, 14.6, 14.84));
+  if (e <= 0) return;
+  ctx.fillStyle = '#000';
+  const bh = e * H / 2;
+  ctx.fillRect(0, 0, W, bh); ctx.fillRect(0, H - bh, W, bh);
+  const lp = E.outExpo(prog(t, 14.8, 14.96));
+  if (t >= 14.8) {
+    const w = lerp(1500, 26, lp), h = lerp(6, 26, lp);
+    ctx.fillStyle = C.org; rrect(W / 2 - w / 2, H / 2 - h / 2, w, h, h / 2); ctx.fill();
+  }
+}
+
+/* ============================================================
+   GLOBAL LAYERS — HUD, flash, grain, vignette
+   ============================================================ */
+const grain = document.createElement('canvas'); grain.width = grain.height = 256;
+(function () {
+  const g = grain.getContext('2d'), id = g.createImageData(256, 256), R = mulberry(11);
+  for (let i = 0; i < id.data.length; i += 4) { const v = R() * 255; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  g.putImageData(id, 0, 0);
+})();
+function shakeAt(t) {
+  let a = 0;
+  for (const [ti, s] of IMPACTS) { const d = t - ti; if (d >= 0 && d < .4) a += s * Math.exp(-d * 13); }
+  return a;
+}
+function flashAt(t) {
+  let a = 0;
+  for (const [ti, s] of IMPACTS) { const d = t - ti; if (d >= 0 && d < .25) a = Math.max(a, Math.min(.85, s * .55) * Math.exp(-d * 22)); }
+  return a;
+}
+function hud(t) {
+  const a = E.outCubic(prog(t, .25, .7)) * (1 - E.inCubic(prog(t, 14.45, 14.65)));
+  if (a <= 0) return;
+  ctx.save(); ctx.globalCompositeOperation = 'difference'; ctx.globalAlpha = a;
+  ctx.strokeStyle = '#fff'; ctx.fillStyle = '#fff'; ctx.lineWidth = 2;
+  const m = 44, L = 34;
+  ctx.beginPath();
+  ctx.moveTo(m, m + L); ctx.lineTo(m, m); ctx.lineTo(m + L, m);
+  ctx.moveTo(W - m - L, m); ctx.lineTo(W - m, m); ctx.lineTo(W - m, m + L);
+  ctx.moveTo(m, H - m - L); ctx.lineTo(m, H - m); ctx.lineTo(m + L, H - m);
+  ctx.moveTo(W - m - L, H - m); ctx.lineTo(W - m, H - m); ctx.lineTo(W - m, H - m - L);
+  ctx.stroke();
+  mono(15, 700); ctx.textAlign = 'left';
+  ctx.fillText('NAHOM GETACHEW', m + 22, m + 30);
+  mono(15, 500); ctx.fillText('MOTION DESIGN REEL — 2026', m + 22, m + 52);
+  const f = Math.min(DUR * FPS - 1, Math.round(t * FPS));
+  const tc = `00:00:${String(Math.floor(f / FPS)).padStart(2, '0')}:${String(f % FPS).padStart(2, '0')}`;
+  mono(15, 700); ctx.textAlign = 'right'; ctx.fillText(tc, W - m - 22, m + 30);
+  mono(15, 500); ctx.fillText('1920×1080 · 60 FPS', W - m - 22, m + 52);
+  let sec = SECTIONS[0]; for (const s of SECTIONS) if (t >= s[0]) sec = s;
+  mono(15, 700); ctx.textAlign = 'left'; ctx.fillText(`${sec[1]} / ${sec[2]}`, m + 22, H - m - 18);
+  const bw = 260, bx = W - m - 22 - bw, by = H - m - 26;
+  ctx.globalAlpha = a * .35; ctx.fillRect(bx, by, bw, 3);
+  ctx.globalAlpha = a; ctx.fillRect(bx, by, bw * t / DUR, 3);
+  for (const s of SECTIONS) ctx.fillRect(bx + bw * s[0] / DUR - 1, by - 5, 2, 13);
+  ctx.restore();
+  // rec dot
+  if (Math.floor(t * 2) % 2 === 0) {
+    ctx.fillStyle = C.org; ctx.globalAlpha = a; ctx.beginPath(); ctx.arc(W - m - 22 - 150, m + 25, 6, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+  }
+}
+
+/* ============================================================
+   MASTER
+   ============================================================ */
+function draw(t) {
+  t = clamp(t, 0, DUR - 1e-6);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  const sh = shakeAt(t);
+  ctx.save();
+  if (sh > 0) {
+    const zx = 1 + sh * .03;
+    ctx.translate(W / 2 + Math.sin(t * 93) * 22 * sh, H / 2 + Math.cos(t * 71) * 18 * sh);
+    ctx.rotate(Math.sin(t * 57) * .012 * sh); ctx.scale(zx, zx); ctx.translate(-W / 2, -H / 2);
+  }
+  if (t < 2) scene0(t);
+  else if (t < 4) scene1(t);
+  else if (t < 6) scene2(t);
+  else if (t < 8.5) scene3(t);
+  else if (t < 10.5) scene4(t);
+  else if (t < 12) scene5(t);
+  else if (t < 13) scene6(t);
+  else scene7(t);
+  ctx.restore();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  const fl = flashAt(t);
+  if (fl > 0) { ctx.fillStyle = `rgba(255,255,255,${fl})`; ctx.fillRect(0, 0, W, H); }
+  hud(t);
+  closer(t);
+  // vignette
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * .45, W / 2, H / 2, H * 1.05);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,.42)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+  // grain
+  const fr = Math.round(t * FPS);
+  ctx.globalAlpha = .055;
+  ctx.fillStyle = ctx.createPattern(grain, 'repeat');
+  ctx.save(); ctx.translate(-hash(fr) * 256, -hash(fr + 1) * 256); ctx.fillRect(0, 0, W + 256, H + 256); ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+/* ---------- boot ---------- */
+async function boot() {
+  const faces = [
+    new FontFace('Unb', 'url(fonts/unbounded-latin-400-normal.woff2)', { weight: '400' }),
+    new FontFace('Unb', 'url(fonts/unbounded-latin-800-normal.woff2)', { weight: '800' }),
+    new FontFace('Unb', 'url(fonts/unbounded-latin-900-normal.woff2)', { weight: '900' }),
+    new FontFace('JBM', 'url(fonts/jetbrains-mono-latin-500-normal.woff2)', { weight: '500' }),
+    new FontFace('JBM', 'url(fonts/jetbrains-mono-latin-700-normal.woff2)', { weight: '700' }),
+  ];
+  await Promise.all(faces.map(f => f.load().then(ff => document.fonts.add(ff))));
+  buildParticles();
+  window.renderFrame = (t) => draw(t);
+  window.READY = true;
+  if (!RENDER) {
+    const audio = new Audio('showreel.wav');
+    let start = null;
+    const loop = (now) => {
+      if (start === null) start = now;
+      const t = ((now - start) / 1000) % (DUR + 1);
+      draw(Math.min(t, DUR - 1e-6));
+      requestAnimationFrame(loop);
+    };
+    cv.addEventListener('click', () => { start = null; audio.currentTime = 0; audio.play().catch(() => {}); });
+    requestAnimationFrame(loop);
+  }
+}
+boot();
+</script>
+</body>
+</html>
